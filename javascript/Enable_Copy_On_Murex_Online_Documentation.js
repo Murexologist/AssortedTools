@@ -1,1 +1,1 @@
-function(){document.body.addEventListener('copy', (e) => {e.stopPropagation();});}
+(function(){document.body.addEventListener('copy', (e) => {e.stopPropagation();});})()
