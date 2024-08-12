@@ -1,0 +1,983 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<snippets>
+	<group category="1 Murex" language="PLSQL">
+		<snippet name="Workflow Probe" description="Workflow Probe">
+			<code><![CDATA[WITH --TIMEZ AS(SELECT TO_TIMESTAMP_TZ('01011970GMT','DDMMYYYYTZR')EPOCH,interval'1'SECOND/1000 MS FROM DUAL),
+WKF_TASK AS(
+SELECT T.CODE TASK,T.TYPE_CODE, TB.CODE NODE_NAME, TB.FILTER_CODE NODE_ID, TB.SYSTEM_ERROR, sheet.MW_CODE SHEET_NAME
+FROM --TIMEZ, 
+MXMLEX_TASK_TABLE T
+INNER JOIN MXMLEX_TASK_TABLEBODY TB ON TB.REFERENCE_ID=T.REFERENCE_ID
+INNER JOIN MW_SHEET_TBL sheet ON sheet.MW_ID = T.MW_SHEET_ID
+WHERE T.STATUS_TAKEN='N' AND DATASOURCE_CODE='STPDOC_ENTRY_SPACE'
+)
+SELECT
+TO_CHAR(D.JOB_DATE,'yyyy/mm/dd ')||' '||TO_CHAR(D.JOB_TIME,'hh24:mi:ss') "TIMESTAMP"
+,D.XMLFLOW_UID
+, D.FC_CID
+, D.FC_ID
+, D.FC_PACKAGE_ID
+, wt.TASK
+, XMLSERIALIZE(DOCUMENT SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) INDENT SIZE=2)
+--, MxBlobToClob(R.XML,R.XML_LZ)
+--, TO_CHAR(TIMEZ.EPOCH+DECODE(d.WAIT_TIME,-1,NULL,d.WAIT_TIME)*TIMEZ.MS,'HH24:MI:SS,FF3') WAIT_TIME
+--, TO_CHAR(TIMEZ.EPOCH+DECODE(d.PROC_TIME,-1,NULL,d.PROC_TIME)*TIMEZ.MS,'HH24:MI:SS,FF3') PROC_TIME
+, b.xmlflow_grammar_name 
+, XMLQUERY('string-join(//trades/*/tradeId, '';'')' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() tradeId
+, XMLQUERY('string-join(//previousTradeId, '';'')' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() previousTradeId
+, XMLQUERY('string-join(//marketOperation, '';'')' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() marketOperation
+, TRIM(classMap.M_NAME) DOC_PARENT_CLASS_ID_NAME
+FROM STPDOC_ENTRY_TABLE D
+INNER JOIN WKF_TASK wt ON D.XMLFLOW_STATUS = wt.NODE_ID
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY B ON B.REFERENCE_ID = D.REFERENCE_ID --AND b.xmlflow_grammar_name = 'MYTRADE.DTD'
+LEFT OUTER JOIN MXMLEX_REPOSITORY_SPACE R ON R.XML_DOCUMENT_ID = B.BODY_DOCUMENT_ID
+LEFT OUTER JOIN CLASS_MAPPING_DBF classMap ON classMap.M_ID = CAST(D.DOC_PARENT_CLASS_ID AS CHAR(10))
+WHERE /*D.JOB_DATE>= TRUNC(SYSDATE)
+AND wt.SHEET_NAME IN ('Murex.Fr.FxOTB') AND wt.TYPE_CODE='ImportMQ'*/
+D.XMLFLOW_STATUS = '33162'
+AND ( D.DOC_PARENT_ID IN (1880764, 1881500)  OR D.FC_ID IN (31513142, 31513143, 31513144,  31513152, 31513153, 31513154 , 31514677, 31514680, 31514682 ))
+ORDER BY TO_CHAR(D.JOB_DATE,'yyyy/mm/dd ')||' '||TO_CHAR(D.JOB_TIME,'hh24:mi:ss')
+;]]></code>
+		</snippet>
+		<snippet name="Workflow Inbound Trade Insertion" description="">
+			<code><![CDATA[WITH 
+WKF_TASK AS(
+SELECT T.CODE TASK,T.TYPE_CODE, TB.CODE NODE_NAME, TB.FILTER_CODE NODE_ID, TB.SYSTEM_ERROR
+FROM MXMLEX_TASK_TABLE T
+INNER JOIN MXMLEX_TASK_TABLEBODY TB ON TB.REFERENCE_ID=T.REFERENCE_ID 
+WHERE T.STATUS_TAKEN='N' AND DATASOURCE_CODE='STPDOC_ENTRY_SPACE'
+)
+,WKF_STRUCTURE AS(
+SELECT WKF_TASK_FROM.TASK TASK_FROM, WKF_TASK_FROM.NODE_ID NODE_FROM,
+WKF_TASK_TO.TASK TASK_TO, WKF_TASK_TO.NODE_ID NODE_TO,
+XMLCast(XMLQuery('/EvsTaskConfig/FilterFields/Column[Name="XMLFLOW_GRAMMAR_NAME"]/Value' PASSING SAFEXMLTYPE(MxBlobToClob(taskCfg.XML,taskCfg.XML_LZ)) RETURNING CONTENT) AS VARCHAR2(50)) XMLFLOW_GRAMMAR_NAME
+FROM MXMLEX_LINK_TABLE MXMLLINK
+INNER JOIN WKF_TASK WKF_TASK_FROM ON WKF_TASK_FROM.TASK = MXMLLINK.FROM_TASK AND WKF_TASK_FROM.NODE_NAME = MXMLLINK.FROM_NODE
+INNER JOIN WKF_TASK WKF_TASK_TO ON WKF_TASK_TO.TASK = MXMLLINK.TO_TASK AND WKF_TASK_TO.NODE_NAME = MXMLLINK.TO_NODE
+LEFT OUTER JOIN MXMLEX_TASK_CFG_TABLE taskCfg on taskCfg.STM_CODE = WKF_TASK_FROM.TASK AND taskCfg.STATUS_TAKEN = 'N'
+WHERE MXMLLINK.STATUS_TAKEN ='N' AND
+WKF_TASK_FROM.TYPE_CODE ='ImportMxML' AND UPPER(WKF_TASK_FROM.NODE_NAME) <>'ERROR' AND WKF_TASK_FROM.SYSTEM_ERROR ='N' 
+)
+,stpDoc AS(
+SELECT
+stpDocEntry.JOB_DATE
+,TO_CHAR(stpDocEntry.JOB_DATE+(stpDocEntry.JOB_TIME-TRUNC(stpDocEntry.JOB_TIME)),'YYYY-MM-DD HH24:MI:SS') INSERTION_DATETIME
+,stpDocEntry.XMLFLOW_UID
+,COALESCE(TRIM(stpDocEntry.STPDOC_UNDERLYING_REF_TYPE),TRIM(stpDocEntry.SOURCE_EVENT_CLASS_ID),TRIM(stpDocEntry.STPDOC_DATA_TYPE2),TRIM(stpDocEntry.STPDOC_REF_TYPE)) SOURCE_SYSTEM
+,COALESCE(TRIM(stpDocEntry.STPDOC_UNDERLYING_REF),TRIM(stpDocEntry.JOB_CLASS_ID)) SOURCE_SYSTEM_ID
+,stpDocEntry.XMLFLOW_STATUS
+,ws.XMLFLOW_GRAMMAR_NAME
+,stpDocEntry.REFERENCE_ID
+FROM WKF_STRUCTURE ws
+INNER JOIN STPDOC_ENTRY_TABLE stpDocEntry ON  stpDocEntry.XMLFLOW_STATUS = ws.NODE_FROM
+WHERE stpDocEntry.JOB_DATE=TO_DATE(:REPORTING_DATE,'DD-MM-YYYY')
+)
+,StpDocBods AS (
+SELECT stpDoc.REFERENCE_ID
+,max(stpDocBodyOk.BODY_DOCUMENT_ID) OK_BODY_DOCUMENT_ID
+,max(stpDocBodyErr.BODY_DOCUMENT_ID) ERR_BODY_DOCUMENT_ID
+FROM STPDOC
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY stpDocBodyOk  ON  stpDocBodyOk.REFERENCE_ID=stpDoc.REFERENCE_ID AND  stpDocBodyOk.XMLFLOW_GRAMMAR_NAME='evs_ans_ok.dtd'
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY stpDocBodyErr ON stpDocBodyErr.REFERENCE_ID=stpDoc.REFERENCE_ID AND stpDocBodyErr.XMLFLOW_GRAMMAR_NAME='evs_ans_err.dtd'
+GROUP BY stpDoc.REFERENCE_ID
+)
+SELECT
+stpDoc.INSERTION_DATETIME
+,stpDoc.XMLFLOW_UID
+,stpDoc.SOURCE_SYSTEM
+,stpDoc.SOURCE_SYSTEM_ID
+,E.EXCEPTION_LEVEL
+,E.TRADE_ID
+,E.ACTION
+,stpDoc.XMLFLOW_STATUS
+,stpDoc.XMLFLOW_GRAMMAR_NAME
+FROM stpDoc
+LEFT OUTER JOIN StpDocBods on StpDocBods.REFERENCE_ID = stpDoc.REFERENCE_ID
+LEFT OUTER JOIN MXMLEX_REPOSITORY_SPACE mxmlexRepoOk ON mxmlexRepoOk.XML_DOCUMENT_ID=StpDocBods.OK_BODY_DOCUMENT_ID
+INNER JOIN XMLTABLE('
+if( /GuiRoot/requestAnswer/body/responseDocument[action] ) then
+  for $i in /GuiRoot/requestAnswer/body/responseDocument[action]
+    return (<r>
+		<action>{data($i/action),":",data($i/businessObjectId/@mefClass),"@",data($i/businessObjectId/identifier)}</action>
+		<exceptionLevel>{data(/GuiRoot/requestAnswer/@exceptionLevel)}</exceptionLevel>
+	</r>)
+else
+	for $i in /GuiRoot
+    let $exceptionLevel := $i/requestAnswer/@exceptionLevel
+    for $j in distinct-values($i//tradeInternalId)
+	return (<r>
+		<tradeInternalId>{data($j)}</tradeInternalId>
+		<exceptionLevel>{data($exceptionLevel)}</exceptionLevel>
+		<mefClass>{data($i//businessObjectId/@mefClass)}</mefClass>
+	</r>)'
+  PASSING SAFEXMLTYPE(REGEXP_REPLACE(MxBlobToClob(mxmlexRepoOk.XML,mxmlexRepoOk.XML_LZ), '<!DOCTYPE[^<]*>', ''))
+  COLUMNS TRADE_ID NUMBER(10) PATH '/r/tradeInternalId'
+          ,EXCEPTION_LEVEL VARCHAR2(50) PATH '/r/exceptionLevel'
+          ,ACTION VARCHAR2(100) PATH '/r/action'
+          )E ON 1=1
+LEFT OUTER JOIN MXMLEX_REPOSITORY_SPACE mxmlexRepoErr ON mxmlexRepoErr.XML_DOCUMENT_ID=StpDocBods.ERR_BODY_DOCUMENT_ID AND E.EXCEPTION_LEVEL <> 'none' AND E.EXCEPTION_LEVEL IS NOT NULL AND StpDocBods.ERR_BODY_DOCUMENT_ID IS NOT NULL
+WHERE --stpDoc.JOB_DATE=TO_DATE(:REPORTING_DATE,'DD-MM-YYYY')
+--AND E.TRADE_ID IN (15813375, 15814735, 15814839) 
+AND stpDoc.FC_ID= 28621634
+ORDER BY stpDoc.REFERENCE_ID]]></code>
+		</snippet>
+		<snippet name="Workflow Outbound Messages" description="">
+			<code><![CDATA[WITH 
+WKF_TASK AS(
+SELECT T.CODE TASK,T.TYPE_CODE, TB.CODE NODE_NAME, TB.FILTER_CODE NODE_ID, TB.SYSTEM_ERROR, sheet.MW_CODE SHEET_NAME
+FROM MXMLEX_TASK_TABLE T
+INNER JOIN MXMLEX_TASK_TABLEBODY TB ON TB.REFERENCE_ID=T.REFERENCE_ID 
+INNER JOIN MW_SHEET_TBL sheet ON sheet.MW_ID = T.MW_SHEET_ID
+WHERE T.STATUS_TAKEN='N' AND DATASOURCE_CODE='STPDOC_ENTRY_SPACE'
+)
+,WKF_STRUCTURE AS(
+SELECT WKF_TASK_FROM.TASK TASK_FROM, WKF_TASK_FROM.NODE_ID NODE_FROM, WKF_TASK_FROM.TYPE_CODE TYPE_CODE_FROM, WKF_TASK_FROM.SHEET_NAME SHEET_FROM,
+WKF_TASK_TO.TASK TASK_TO, WKF_TASK_TO.NODE_ID NODE_TO
+--XMLCast(XMLQuery('/EvsTaskConfig/FilterFields/Column[Name="XMLFLOW_GRAMMAR_NAME"]/Value' PASSING SAFEXMLTYPE(MxBlobToClob(taskCfg.XML,taskCfg.XML_LZ)) RETURNING CONTENT) AS VARCHAR2(50)) XMLFLOW_GRAMMAR_NAME
+FROM MXMLEX_LINK_TABLE MXMLLINK
+INNER JOIN WKF_TASK WKF_TASK_FROM ON WKF_TASK_FROM.TASK = MXMLLINK.FROM_TASK AND WKF_TASK_FROM.NODE_NAME = MXMLLINK.FROM_NODE
+INNER JOIN WKF_TASK WKF_TASK_TO ON WKF_TASK_TO.TASK = MXMLLINK.TO_TASK AND WKF_TASK_TO.NODE_NAME = MXMLLINK.TO_NODE
+LEFT OUTER JOIN MXMLEX_TASK_CFG_TABLE taskCfg on taskCfg.STM_CODE = WKF_TASK_FROM.TASK AND taskCfg.STATUS_TAKEN = 'N'
+WHERE MXMLLINK.STATUS_TAKEN ='N' 
+/*AND WKF_TASK_FROM.TYPE_CODE ='ImportMxML' */
+AND UPPER(WKF_TASK_FROM.NODE_NAME) <>'ERROR' AND WKF_TASK_FROM.SYSTEM_ERROR ='N' 
+)
+SELECT
+TO_CHAR(D.JOB_DATE,'yyyy/mm/dd ')||' '||TO_CHAR(D.JOB_TIME,'hh24:mi:ss') "TIMESTAMP"
+,D.XMLFLOW_UID
+,D.FC_ID ContractId
+,D.FC_CID TradeId
+,D.FC_VERSION ContractVersion
+,D.XMLFLOW_UID
+,ws.TYPE_CODE_FROM
+, ws.TASK_FROM
+, ws.SHEET_FROM
+, XMLQUERY('/MMTRADE/adhoc_interest_amount/text()' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() adhoc_interest_amount
+, XMLQUERY('/MMTRADE/par_maturity_amount/text()' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() par_maturity_amount
+, XMLQUERY('/MMTRADE/maturity_date/text()' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() maturity_date
+, XMLQUERY('/MMTRADE/start_date/text()' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() start_date
+, XMLQUERY('/MMTRADE/trade_date/text()' passing SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ)) returning content).GETSTRINGVAL() trade_date
+, SAFEXMLTYPE( MxBlobToClob(R.XML,R.XML_LZ))
+
+FROM STPDOC_ENTRY_TABLE D
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY B ON B.REFERENCE_ID = D.REFERENCE_ID /*AND b.xmlflow_grammar_name = 'MYTRADE.DTD'*/
+LEFT OUTER JOIN MXMLEX_REPOSITORY_SPACE R ON R.XML_DOCUMENT_ID = B.BODY_DOCUMENT_ID
+LEFT OUTER JOIN WKF_STRUCTURE ws ON  d.XMLFLOW_STATUS = ws.NODE_FROM
+WHERE /*D.XMLFLOW_STATUS = '24022'
+--AND D.JOB_DATE>= TRUNC(SYSDATE-60)
+--AND XMLFLOW_UID = 14114144*/
+D.FC_ID= 29350650
+AND ws.TYPE_CODE_FROM = 'ExportMQ'
+order by 1 ]]></code>
+		</snippet>
+		<snippet name="Zipped BLOB Update Example" description="">
+			<code><![CDATA[MERGE INTO MXMLEX_TASK_CFG_TABLE a
+USING (
+WITH XSL AS(
+SELECT XMLTYPE(
+q'[<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="xml" version="1.0" encoding="UTF-8" indent="yes"/>
+<!-- Identity Transform -->
+<xsl:template match="@*|node()"><xsl:copy><xsl:apply-templates select="@*|node()"/></xsl:copy></xsl:template>
+<xsl:template match="/TaskConfiguration/PropertyGroup/Property[@name='Username']/text()">r10856</xsl:template>
+<xsl:template match="/TaskConfiguration/PropertyGroup/Property[@name='Password']/text()">0085004e00e4006b00030071007a002b00b800cd002600b500b6004f007b002b005700e700b300a200e500cc00be00d5003a003f00120033005000e700fe009f</xsl:template>
+<xsl:template match="/TaskConfiguration/PropertyGroup/Property[@name='From']/text()">MxCTX#support@bank.com#Mx</xsl:template>
+</xsl:stylesheet>]') SET_EMAIL_PROPS
+FROM DUAL )
+SELECT TasksCfg.REFERENCE_ID
+,TasksCfg.STM_CODE
+,ZIPCLOB(XMLTRANSFORM(XMLTYPE(MXBLOBTOCLOB(TasksCfg.XML,TasksCfg.XML_LZ)),XSL.SET_EMAIL_PROPS).GETCLOBVAL()) TRANSFORMED_CFG_ZIPPED
+,dbms_lob.getlength(XMLTRANSFORM(XMLTYPE(MXBLOBTOCLOB(TasksCfg.XML,TasksCfg.XML_LZ)),XSL.SET_EMAIL_PROPS).GETCLOBVAL()) TRANSFORMED_CFG_XML_LU
+,dbms_lob.getlength(ZIPCLOB(XMLTRANSFORM(XMLTYPE(MXBLOBTOCLOB(TasksCfg.XML,TasksCfg.XML_LZ)),XSL.SET_EMAIL_PROPS).GETCLOBVAL())) TRANSFORMED_CFG_ZIPPED_XML_LZ
+FROM MXMLEX_TASK_TABLE Tasks
+INNER JOIN MXMLEX_TASK_CFG_TABLE TasksCfg ON TasksCfg.STM_CODE = Tasks.CODE
+,XSL
+WHERE TasksCfg.STATUS_TAKEN='N'
+AND Tasks.STATUS_TAKEN='N'
+AND Tasks.TYPE_CODE IN ('Email')
+) b
+ON (a.REFERENCE_ID = b.REFERENCE_ID)
+WHEN MATCHED THEN
+UPDATE SET 
+a.XML = b.TRANSFORMED_CFG_ZIPPED,
+a.XML_LU = b.TRANSFORMED_CFG_XML_LU,
+a.XML_LZ = b.TRANSFORMED_CFG_ZIPPED_XML_LZ
+;
+]]></code>
+		</snippet>
+		<snippet name="Data Dictionnary Formulas lookup - case unsensitive" description="">
+			<code><![CDATA[WITH PARAMS AS (
+    SELECT
+    :SEARCH_STRING SEARCH_STRING
+    , 300 SNIPPET_MARGIN
+    FROM DUAL )
+, SEARCH_QUERY AS (
+    SELECT 
+      dd.FORMULA_LABEL
+    , LENGTH(SEARCH_STRING)+2*SNIPPET_MARGIN SUBSTR_AMOUNT
+    , GREATEST(1,INSTR(UPPER(MxBlobToClob(dd.XML,dd.XML_LZ)),UPPER(SEARCH_STRING))-SNIPPET_MARGIN) SUBTR_OFFSET
+    , MxBlobToClob(dd.XML,dd.XML_LZ) FML_CLOB
+    , dd.FORMULA_TYPE
+    , dd.FORMULA_CONTEXT
+    , dd.REVISION_ID
+    , TO_CHAR(dd.TIME_STAMP_DATE,'YYYY-MM-DD')||' '||TO_CHAR(dd.TIME_STAMP_TIME,'HH24:MI:SS') LAST_UPDATED
+    -- The REGEXP_REPLACE expression below is to escape regular expression operators and metasymbols so that REGEXP_COUNT does work as we intend.
+    , REGEXP_COUNT(UPPER(MxBlobToClob(dd.XML,dd.XML_LZ)),REGEXP_REPLACE(UPPER(SEARCH_STRING),'([\\$.*\[+?\|^({)])','\\\1')) NB_OCCURENCES
+    FROM
+      PARAMS
+    , XMLSPACE_DD_FORMULAE_TABLE dd
+    WHERE
+    dd.STATUS_TAKEN = 'N'
+    AND INSTR(UPPER(MxBlobToClob(dd.XML,dd.XML_LZ)),UPPER(SEARCH_STRING)) <> 0
+)
+SELECT
+  FORMULA_LABEL
+, NB_OCCURENCES
+, DECODE(SUBTR_OFFSET,1,'','[...]') /*Ellipsis Prefix*/
+    ||DBMS_LOB.SUBSTR(FML_CLOB, SUBSTR_AMOUNT, SUBTR_OFFSET)
+    ||DECODE(SIGN(SUBTR_OFFSET+SUBSTR_AMOUNT - LENGTH(FML_CLOB)),1,'','[...]')/*Ellipsis Postfix*/
+    SNIPPET
+, SUBTR_OFFSET
+, SUBSTR_AMOUNT
+, LENGTH(FML_CLOB)
+, FORMULA_TYPE
+, FORMULA_CONTEXT
+, REVISION_ID
+, LAST_UPDATED
+, FML_CLOB
+FROM SEARCH_QUERY
+ORDER BY FORMULA_LABEL
+;]]></code>
+		</snippet>
+		<snippet name="Workflow Tasks Configuration" description="">
+			<code><![CDATA[SELECT TasksCfg.REFERENCE_ID
+,TasksCfg.STM_CODE
+,Tasks.TYPE_CODE
+,XMLSERIALIZE(DOCUMENT SAFEXMLTYPE(MXBLOBTOCLOB(TasksCfg.XML,TasksCfg.XML_LZ)) INDENT SIZE=2) CFG
+FROM MXMLEX_TASK_TABLE Tasks
+INNER JOIN MXMLEX_TASK_CFG_TABLE TasksCfg
+    ON TasksCfg.STM_CODE = Tasks.CODE
+WHERE TasksCfg.STATUS_TAKEN='N'
+AND Tasks.STATUS_TAKEN='N'
+AND Tasks.TYPE_CODE IN ('XmlTransformer','XmlTransformerRouter')
+]]></code>
+		</snippet>
+		<snippet name="Datamart Batches" description="">
+			<code><![CDATA[SELECT 
+  decode(batchCfg.M_TYPE,0,'batch of actuate reports',1,'batch of feeders',2,'batch of extractions',3,'batch of stored procedures','_unknown object type_') as M_TYPE_DECODED
+, TRIM(batchCfg.M_LABEL) BATCH_LABEL
+, TRIM(batchCfg.M_TAGDATA) Label_of_Data
+, DECODE(batchCfg.M_DATTYPE,0, 'No Selection',1, 'Contextual Today',2, 'Contextual Yesterday',3, 'Origin Monthly',4, 'Relative Minus',5, 'Inception Date',6, 'System Date',7, 'User Defined Date',8, 'Accounting Date',9, 'Relatvie Previous',10, 'Relative Next',11, 'Origin Simulation',12, 'Origin Daily',13, 'Origin Yearly',14, 'Relative Plus',15, 'Trading Date',16, 'Trading Yesterday',17, 'PnL Date',18, 'PnL Yesterday',19, 'Date Shifter',23, 'Reporting Date',24, 'Reporting Shifter Date',null,null,'_unkniwn') LOD_DATE_TYPE
+, TRIM(batchFilter.M_LABEL) FILTER_LABEL
+, DECODE(batchFilter.M_CLASS,-1,'InvalidValue', 0,'Undefined', 1,'Trn_RPPL', 10,'Trn_RPRT', 11,'Trn_RPFX', 12,'Trn_RPMK', 13,'Trn_RPMV', 14,'Trn_RPCD', 15,'Trn_RPXV', 16,'Trn_RPOK', 17,'Report', 18,'Accounting', 19,'Payment', 2,'Trn_PL', 20,'CopyCreation', 21,'External', 22,'AccountingReporting', 23,'Trn_SIMUL', 24,'Trn_PLVAR', 25,'Trn_JavaPlugin', 26,'Trn_DataDctEngine', 27,'Trn_SQL', 28,'Trn_THETA_ANALYSIS', 29,'Trn_VAR', 3,'Trn_RPCS', 30,'Trn_SIMUL_PLE', 31,'Trn_PLVAR_PLE', 32,'DlvCash', 33,'Trn_ODREngine', 34,'Trn_TradeVersionAudit', 35,'NavigationTemplates', 36,'Trn_PFL_SIMUL', 37,'LRBRequest', 38,'STPRights', 39,'STPRightsAudit', 4,'Trn_RPS1', 40,'RiskMatrix', 41,'ClassificationTree', 42,'CashPositionStatements', 43,'SecuritiesPositionStatements', 44,'LiquidationPositionStatements', 45,'DlvPhysical', 46,'HedgeConfig', 47,'HedgeTrade', 48,'HedgeEffectiveness', 49,'HedgeMeasurement', 5,'Trn_PLVR', 50,'Trn_VAR_DATASOURCE', 51,'MarketRiskAggregation', 52,'LiquidationContributorsStatements', 53,'Order', 54,'Livebook', 55,'Hedge', 6,'Trn_RPDT', 7,'Trn_RPXG', 8,'Trn_RPSV', 9,'Trn_RPHB',null,null,'_unknown_') BATCH_FILTER_CLASS
+, batchCfg.M_DATACOMP as M_DATA_IS_PRECOMPUTED
+, batchCfg.M_DATASHARED as M_DATA_IS_SHARED
+, batchCfg.M_SERIALIZED as M_DATA_IS_COMP_MULTI_BATCH
+--, scannerTemplate.M_TEMPLATE
+, TRIM(batchElt.M_LABEL) ELT_LABEL
+, TRIM(batchEltCfg.M_FILE_PATH) ELT_FILE_PATCH
+, TRIM(batchEltCfg.M_EXT_FILE) ELT_FILE_NAME
+FROM ACT_SET_DBF batchCfg
+LEFT OUTER JOIN DAPFILTER_DBF batchFilter ON batchFilter.M_LABEL = batchCfg.M_FLTTEMP AND TRIM(batchCfg.M_FLTTEMP) IS NOT NULL
+--LEFT OUTER JOIN SCANNERCFG_DBF scannerTemplate ON scannerTemplate.M_REFERENCE = batchCfg.M_SCNTMPL 
+LEFT OUTER JOIN ACT_SETREP_DBF batchEltCfg ON batchEltCfg.M_REFSET = batchCfg.M_REF
+--LEFT OUTER JOIN ACT_PAR_DBF batchEltParams ON batchEltParams.M_ID = batchEltCfg.M_REF
+LEFT OUTER JOIN ACT_BAT_DBF batchElt ON batchElt.M_REF = batchEltCfg.M_REFBAT
+--LEFT OUTER JOIN DAPVAR_DBF interactiveVars ON interactiveVars.M_REF =batchCfg.M_VARSET  
+--WHERE upper(batchEltCfg.M_EXT_FILE) LIKE UPPER('%md_inf_vol_capfloor_curve%')]]></code>
+		</snippet>
+		<snippet name="Pretrade Formula Lookup" description="">
+			<code><![CDATA[
+WITH PARAMS AS (
+    SELECT
+        :SEARCH_STRING SEARCH_STRING
+        , 45 SNIPPET_MARGIN
+    FROM DUAL ),
+INSTR_RES AS (
+SELECT TRIM(dd.M_NAME) M_NAME
+, INSTR(UPPER(MxBlobToClob(dd.M_BODY,0)),UPPER(SEARCH_STRING)) INSTR_OFFSET
+, MxBlobToClob(dd.M_BODY,0) FML
+FROM PARAMS, NPD_MSL_DBF dd
+WHERE INSTR(UPPER(MxBlobToClob(dd.M_BODY,0)),UPPER(SEARCH_STRING)) <> 0
+)
+SELECT M_NAME
+, '[...]'||DBMS_LOB.SUBSTR(FML, LENGTH(SEARCH_STRING)+2*SNIPPET_MARGIN, GREATEST(1,INSTR_OFFSET-SNIPPET_MARGIN))||'[...]' SNIPPET
+,FML
+FROM INSTR_RES,PARAMS
+ORDER BY M_NAME
+;]]></code>
+		</snippet>
+		<snippet name="Datamart batches and Processing Scripts" description="">
+			<code><![CDATA[select ps.M_NAME,
+psItem.M_ORDER,
+psItem.M_UNIT,
+batchCfg.M_LABEL as M_BATCH_NAME,
+psItem.M_PARAM_LAB3
+from PROCESS#PS_SCRPT_DBF ps
+left outer join PROCESS#PS_ITEM_DBF psItem on psItem.M_REF = ps.M_REF
+left outer join ACT_SET_DBF batchCfg on trim(psItem.M_PARAM_LAB2) = trim(batchCfg.M_LABEL)
+where batchCfg.M_LABEL is not null
+order by ps.M_NAME, psItem.M_ORDER
+]]></code>
+		</snippet>
+		<snippet name="Workflow Tasks not linked to ErrorQueue" description="">
+			<code><![CDATA[SELECT  workflowFrom.MW_SUB_CODE Workflow, sheetFrom.MW_CODE Sheet, mxmlexTaskFrom.CODE Task,  mxmlexTaskBodyFrom.CODE Node, mxmlexTaskFrom.TYPE_CODE Task_Type
+FROM MUREX.MXMLEX_TASK_TABLE mxmlexTaskFrom
+INNER JOIN MUREX.MXMLEX_TASK_TABLEBODY mxmlexTaskBodyFrom on mxmlexTaskBodyFrom.REFERENCE_ID = mxmlexTaskFrom.REFERENCE_ID 
+INNER JOIN MUREX.MW_SHEET_TBL sheetFrom on mxmlexTaskFrom.MW_SHEET_ID = sheetFrom.MW_ID and sheetFrom.STATUS_TAKEN = 'N'
+LEFT OUTER JOIN MUREX.MXMLEX_LINK_TABLE mxmlLink on mxmlexTaskFrom.CODE = mxmlLink.FROM_TASK and mxmlexTaskBodyFrom.CODE = mxmlLink.FROM_NODE and mxmlLink.STATUS_TAKEN = 'N'
+INNER JOIN MUREX.MW_LOGICAL_WORKFLOW_TBL workflowFrom on workflowFrom.MW_ID = sheetFrom.MW_LOGICAL_WORKFLOW_ID and workflowFrom.STATUS_TAKEN = 'N'
+WHERE mxmlexTaskFrom.TYPE_CODE NOT IN ('SystemErrorQueue')
+AND mxmlexTaskFrom.STATUS_TAKEN = 'N'
+AND mxmlexTaskBodyFrom.CODE LIKE '~SYS_ERROR~%'
+AND mxmlLink.REFERENCE_ID IS NULL
+AND workflowFrom.MW_SUB_CODE NOT LIKE 'PreTrade%'
+AND workflowFrom.MW_SUB_CODE NOT IN ('Avent','Communication')
+ORDER BY workflowFrom.MW_SUB_CODE, sheetFrom.MW_CODE, mxmlexTaskFrom.CODE]]></code>
+		</snippet>
+		<snippet name="Set Murex Default Date Format" description="">
+			<code><![CDATA[ALTER SESSION SET NLS_DATE_FORMAT = 'YYYYMMDD';]]></code>
+		</snippet>
+		<snippet name="Datamart Prefilter Expression Lookup" description="">
+			<code><![CDATA[WITH PARAMS AS (
+    SELECT
+        'TO_NUMBER' SEARCH_STRING
+        , 30 SNIPPET_MARGIN
+    FROM DUAL )
+SELECT BATCH_LABEL
+, FILTER_LABEL
+, '[...]'|| SUBSTR(FILTER_EXPR, GREATEST(0,INSTR(FILTER_EXPR,SEARCH_STRING)-SNIPPET_MARGIN), LENGTH(SEARCH_STRING)+2*SNIPPET_MARGIN )||'[...]' SNIPPET
+, FILTER_EXPR
+FROM (
+    SELECT 
+    batchCfg.M_LABEL BATCH_LABEL,
+    batchFilter.M_LABEL FILTER_LABEL, 
+    LISTAGG(fltExp.M_EXP_VAL) WITHIN GROUP (ORDER BY fltExp.M_EXP_IND) FILTER_EXPR
+    FROM DAPFILTER_DBF batchFilter
+    LEFT OUTER JOIN ACT_SET_DBF batchCfg ON batchFilter.M_LABEL = batchCfg.M_FLTTEMP
+    LEFT OUTER JOIN DAPFLT_EXP_DBF fltExp ON  fltExp.M_FILTER_REF =  batchFilter.M_FILTER_REF
+    GROUP BY batchCfg.M_LABEL,batchFilter.M_LABEL
+) FLT_AGG, PARAMS
+WHERE (
+    INSTR(UPPER(FILTER_EXPR), PARAMS.SEARCH_STRING) <> 0
+)
+;]]></code>
+		</snippet>
+		<snippet name="Archiving group from Lookup table" description="">
+			<code><![CDATA[WITH FUNCTION getArch(ltn IN VARCHAR2,gl IN VARCHAR2,co IN VARCHAR2) RETURN VARCHAR2 
+    IS ht VARCHAR2(64);
+       bt VARCHAR2(64);
+       idx NUMBER(10,0);
+       arch VARCHAR2(64);
+    BEGIN
+        EXECUTE IMMEDIATE q'[SELECT TRIM(M_HEADER)||'_DBF', TRIM(M_BODY)||'_DBF' FROM RTG_TYP_DBF WHERE M_LABEL=CAST(:1 AS CHAR(47))]' INTO ht,bt USING ltn;
+        EXECUTE IMMEDIATE 'SELECT M__INDEX_ FROM '||ht||' WHERE M_LABEL=CAST( :1 AS CHAR(47))' INTO idx USING gl;
+        EXECUTE IMMEDIATE q'[SELECT TRIM(M_ARCHGRP)||':'||TRIM(M_ARCHCOL)FROM ]'||bt||q'[ WHERE M__INDEX_=:1 AND M_EXCPT='Yes' AND M_CUTOFF =:2 ]' INTO arch USING idx,co;
+        RETURN arch;
+    END;
+SELECT getArch('Name.of.LUT','ALL', '10NY') ARCH FROM DUAL;
+;]]></code>
+		</snippet>
+		<snippet name="STP Rights" description="">
+			<code><![CDATA[/* To be perfected... */
+select
+  TRIM(grp.M_LABEL) "group label"
+, TRIM(globalTemplate.M_LABEL) "Global rights template"
+, TRIM(sourceModuleTemplate.M_LABEL) "Source module template"
+, TRIM(businessObjectTemplate.M_LABEL) "Business object template"
+, DECODE(businessObjectTemplate.M_TYPE,1,'Contract/Package',2,'Deliverable',3,'Contract/Package event',4,'Deliverable event',5,'Settlement instruction',6,'Order',7,'Order event',8,'Account',9,'Account event',10,'Security',11,'Security event',12,'Hedge',13,'Hedge event',14,'Accounting entry',15,'Accounting entry event',16,'Inventory accounting entry',18,'Credit basket',19,'Collateral exchange',20,'Transfer',21,'Collateral exchange event','_unknown_: '||businessObjectTemplate.M_TYPE) "Business object"
+, TRIM(groupingTemplateFolderNode.M_LABEL) "grouping template"
+/* Rights Profile Template stuff */
+, NVL(TRIM(groupingTemplateTypologyNode.M_LABEL),'<Default>') "grouping template typology"
+, TRIM(profileTemplate.M_LABEL) "rights profile"
+, DECODE(profileEntry.M_ACTION,0,'Unknown/NA',1,'Insert',2,'Modify',4,'Delete',8,'Cancel',32,'Access',64,'Cancel and reevent',32768,'Undo cancel',null,'','_unknown_: '||profileEntry.M_ACTION) "profile Action/Event"
+, DECODE(profileEntry.M_VIEW,1,'ALL',2,'NON_FINANCIAL',3,'SI',4,'NON_AUDITABLE',null,'','_unknown_: '||profileEntry.M_VIEW) "profile View"
+, TRIM(profileEntry.M_STATUS) "profile Status"
+, TRIM(profileEntryEventClass.M_EVT_DLABEL) "profile Entry Event/Trade Typology"
+, groupingTemplateTypologyNode.*
+--, '**** GRP_STP_DBF *****'
+--, grpStp.*
+--, '**** STP_RGH_TPL_GBL_DBF *****'
+--, globalTemplate.*
+--, '**** STP_RGH_TPL_SM_DBF *****'
+--, sourceModuleTemplate.*
+--, '**** STP_RGH_TPL_BO_DBF *****'
+--, businessObjectTemplate.*
+--, '**** STP_RGH_TREE_DBF *****'
+--, groupingTemplate.*
+--, '**** STP_RGH_TPL_PFL_DBF *****'
+--, profileTemplate.*
+--, '**** STP_RGH_NOD_PFL_DBF *****'
+--, groupingTemplateFolderNode.*
+--, '**** STP_RGH_NOD_PFL_DBF *****'
+--, groupingTemplateTypologyNode.*
+--, '**** STP_RGH_NODE_DBF *****'
+--, nodeProfile.*
+--, '**** STP_RGH_TPL_PFLR_DBF *****'
+--, profileEntry.*
+--, '**** EVT_MAP_DBF *****'
+--, profileEntryEventClass.*
+--, '**** CLASS_MAPPING_DBF *****'
+--, profileEntryEventClass.*
+--, '**** STP_RGH_TPL_PFL_DBF *****'
+--, profileTemplateRights.*
+--, '**** STP_RGH_TPL_PFLR_DBF *****'
+--, profileEntryRights.*
+--, '**** STP_RGH_TPL_PFL_DBF *****'
+--, nodeProfileRights.*
+from TRN_GRPD_DBF grp
+inner join GRP_STP_DBF grpStp on grpStp.M_GRP_REF = grp.M_REFERENCE
+inner join STP_RGH_TPL_GBL_DBF globalTemplate on globalTemplate.M_REFERENCE = grpStp.M_RIGHT_DATA
+inner join STP_RGH_TPL_SM_DBF sourceModuleTemplate on sourceModuleTemplate.M_REFERENCE = globalTemplate.M_SM_TPL
+inner join STP_RGH_GBL2BO_DBF globalToBO on globalToBO.M_CTN = globalTemplate.M_REFERENCE
+inner join  STP_RGH_TPL_BO_DBF businessObjectTemplate on businessObjectTemplate.M_REFERENCE = globalToBO.M_REF
+
+/* Grouping Template stuff */
+left join STP_RGH_TREE_DBF groupingTemplate on groupingTemplate.M_REFERENCE = businessObjectTemplate.M_TREE
+left join STP_RGH_NODE_DBF groupingTemplateFolderNode on groupingTemplateFolderNode.M_TREE = groupingTemplate.M_REFERENCE and groupingTemplateFolderNode.M_TYPE = 1
+left join STP_RGH_NODE_DBF groupingTemplateTypologyNode on groupingTemplateTypologyNode.M_TREE = groupingTemplate.M_REFERENCE and groupingTemplateTypologyNode.M_PARENT = groupingTemplateFolderNode.M_REFERENCE and groupingTemplateTypologyNode.M_TYPE = 2
+left join STP_RGH_NOD_PFL_DBF nodeProfile on nodeProfile.M_NODE = groupingTemplateFolderNode.M_REFERENCE and nodeProfile.M_BO = businessObjectTemplate.M_REFERENCE
+left join STP_RGH_TPL_PFL_DBF profileTemplate on profileTemplate.M_REFERENCE = nodeProfile.M_PFL or profileTemplate.M_REFERENCE = businessObjectTemplate.M_PROFILE
+left join STP_RGH_TPL_PFLR_DBF profileEntry on profileEntry.M_TPL = profileTemplate.M_REFERENCE or profileEntry.M_TPL = profileTemplate.M_REFERENCE
+left join EVT_MAP_DBF profileEntryEventClass on profileEntryEventClass.M_EVT_INTID = profileEntry.M_EVT_CID or profileEntryEventClass.M_EVT_INTID = groupingTemplateTypologyNode.M_TYPO_CID
+--left join CLASS_MAPPING_DBF typoClass on typoClass.M_ID = groupingTemplateTypologyNode.M_TYPO_CID
+
+--WHERE 
+
+ORDER BY 
+businessObjectTemplate.M_LABEL
+, profileTemplate.M_LABEL
+, groupingTemplateFolderNode.M_LABEL
+, profileEntry.M_STATUS
+, profileEntryEventClass.M_EVT_DLABEL
+]]></code>
+		</snippet>
+		<snippet name="Dynamic Table" description="">
+			<code><![CDATA[SELECT TRIM(M_CREATION) "Label"
+, DECODE(M_CLASS_TYPE, 0,'Transaction'
+, 1,'Accounting'
+, 2,'Copy Creation'
+, 3,'External'
+, 4,'Payment'
+, 5,'Definition Report'
+, 6,'Accounting Reporting'
+, 7,'Cash Balances'
+, 8,'Simulation Views'
+, 9,'PL Variances'
+,10,'Java Plugin'
+,11,'Data dictionary service'
+,12,'Theta Analysis'
+,13,'VaR'
+,14,'Simulation PLE'
+,15,'PLVar PLE'
+,16,'Deliverable cash'
+,17,'Deliverable nostro cash'
+,18,'ODR engine'
+,19,'Trade version audit'
+,20,'Navigation template'
+,21,'LRB Request'
+,22,'STP Rights'
+,23,'STP Rights Audit'
+,24,'Risk matrix'
+,25,'Hedge config'
+,26,'Hedge trade'
+,27,'Hedge effectiveness'
+,28,'Hedge measurement'
+,29,'Cash position statements'
+,30,'Securities position statements'
+,31,'Liquidation position statements'
+,32,'Classification tree'
+,33,'Delivery physical'
+,34,'VaR (datasource)'
+,35,'Order'
+,36,'Simsrv config'
+,37,'Liquidation inventory statements'
+,38,'Corporate actions position statements'
+,39,'Accounting inventory entries'
+,40,'ACG inventory balances'
+,41,'Market risk aggregation'
+,42,'Settlement management statements in liquidation'
+,43,'VaR (scenarios)'
+,44,'Livebook'
+,45,'PostTrade Workflow Audit'
+,46,'Corporate actions static data'
+,47,'Hedge'
+,48,'Simulation by GType'
+,49,'CVA'
+,50,'Inventory simulatio'
+,51,'Collateral exchange'
+,52,'Transfer'
+,53,'Accounting audit'
+,54,'-deprecated- Collateral inventory'
+,55,'-deprecated- Interest'
+,56,'Not used - technical value'
+,57,'Simulation sample'
+,58,'Copy creation sample'
+,59,'Risk Based PnL'
+,60,'PRM Balance'
+,61,'Copy creation'
+,62,'LRB'
+,63,'Limit Compliance (Rule)'
+,64,'Compliance (Rule)'
+,65,'Collateral Asset eligibilty'
+,66,'Reporting audit'
+,67,'Market risk aggregation'
+,68,'Compliance (Audit)'
+,69,'Compliance (Evaluation)'
+,70,'Limit Compliance (Audit)'
+,71,'Limit Compliance (Evaluation)'
+,72,'Collateral inventory'
+,73,'Market Risk Limit Audit'
+,74,'Collateral interest'
+,75,'Counterparty'
+,76,'Portfolio'
+,77,'Excess Management'
+,78,'Forwards viewer'
+,79,'Simulation'
+,81,'Simulation'
+,93,'Entry PL'
+,'UNKNOWN M_CLASS_TYPE '||M_CLASS_TYPE) DYN_TABLE_TYPE
+,M_CLASS_TYPE
+, TRIM(M_CLASS) "Class"
+, DECODE(M_CLASS_TYPE
+    , 79 /*Simulation*/ , DECODE(M_F_SUB_TYPE, 0, 'Detailled', 1, 'Consolidated','UNKNOWN M_F_SUB_TYPE '||M_F_SUB_TYPE ) 
+    , 81 /*Simulation*/ , DECODE(M_F_SUB_TYPE, 0, 'Detailled', 1, 'Consolidated','UNKNOWN M_F_SUB_TYPE '||M_F_SUB_TYPE ) 
+) "Subtype"
+, DECODE(M_CLASS_TYPE
+    , 79 /*Simulation*/ , DECODE(M_F_SUB_TYPE
+        , 0 /*Detailled*/ , DECODE(M_SUB_TYPE_L2, 0,'By Portfolio',1,'By Trade',2,'Counterpart Side', 'UNKNOW M_SUB_TYPE_L2 '|| M_SUB_TYPE_L2)
+        , 1 /*Consolidated*/, DECODE(M_SUB_TYPE_L2, 0,'By Portfolio',1,'By Trade', 'UNKNOW M_SUB_TYPE_L2 '|| M_SUB_TYPE_L2)
+        ,'UNKNOWN M_F_SUB_TYPE'||M_F_SUB_TYPE ) 
+    , 81 /*Simulation*/ , DECODE(M_F_SUB_TYPE
+        , 0 /*Detailled*/ , DECODE(M_SUB_TYPE_L2, 0,'By Portfolio',1,'By Trade',2,'Counterpart Side', 'UNKNOW M_SUB_TYPE_L2 '|| M_SUB_TYPE_L2)
+        , 1 /*Consolidated*/, DECODE(M_SUB_TYPE_L2, 0,'By Portfolio',1,'By Trade', 'UNKNOW M_SUB_TYPE_L2 '|| M_SUB_TYPE_L2)
+        ,'UNKNOWN M_F_SUB_TYPE'||M_F_SUB_TYPE ) 
+    , '') "Subtype 2"
+, M_SUB_TYPE_L2
+, TRIM(M_CODE) "Creation code"
+, DECODE(M_F_CNSVIEW, 0, 'No', 1 , 'Yes') "Consolidated view"
+FROM DYNDBF2#TRN_DYND_DBF
+ORDER BY M_CREATION
+;]]></code>
+		</snippet>
+		<snippet name="Child Cursor Counting" description="Child Cursor Counting">
+			<code><![CDATA[select a.cursors, a.sql_id,b.sql_text
+from
+(
+select count(*) as cursors, ssc.sql_id
+from v$sql_shared_cursor ssc
+group by ssc.sql_id
+order by cursors desc
+) a,
+(
+select sa.sql_id, sa.sql_text from v$sqlarea sa
+) b
+where a.sql_id=b.sql_id;
+]]></code>
+		</snippet>
+		<snippet name="User Profile - Screen sets" description="">
+			<code><![CDATA[WITH navTemplate AS (
+    SELECT
+      navTmpl.M_REFERENCE
+    , navTmpl.M_LABEL
+    , menuEntries.menuPath
+    , menuEntries.id
+    , menuEntries.name
+    , menuEntries.isInNavigation
+    , REGEXP_REPLACE(menuEntries.id, '.*_([[:digit:]]*)', 'COMMAND_\1') commandId
+    FROM NAV_TMPL_DBF navTmpl
+    LEFT OUTER JOIN XMLTABLE(q'[
+    for $leafNode in //Node[not(Children)]
+        let $menuPath := $leafNode/string-join(ancestor-or-self::Node/Name,' => ')
+        return (<r>
+            <menuPath>{$menuPath}</menuPath>
+            <id>{$leafNode/ID/text()}</id>
+            <name>{$leafNode/Name/text()}</name>
+            <isInNavigation>{$leafNode/IsInNavigation/text()}</isInNavigation>
+        </r>)]'
+    PASSING SAFEXMLTYPE(REGEXP_REPLACE(BLOBTOCLOB(navTmpl.M_CONTENT),'<!DOCTYPE[^<]*>', ''))
+    COLUMNS   menuPath VARCHAR2(2048) PATH '/r/menuPath'
+            , id VARCHAR2(1024) PATH '/r/id'
+            , name VARCHAR2(1024) PATH '/r/name'
+            , isInNavigation VARCHAR2(1) PATH '/r/isInNavigation'
+    ) menuEntries ON 1=1
+)
+SELECT --usrProf.M_PROFILE,
+  profBatches.groupId
+, profBatches.batchName
+, profBatches.title
+, navTemplate.menuPath
+, viewsCfg.M_CFG_LBL viewLayoutLabel
+, profBatches.portfolios --, SAFEXMLTYPE(REGEXP_REPLACE(BLOBTOCLOB(usrProf.M_PROFILE),'<!DOCTYPE[^<]*>', ''))
+FROM MX_USR_PROFILE_DBF usrProf 
+INNER JOIN MX_USER_GROUP_PROFILE_DBF userGroupProf on userGroupProf.M_PROFILE_ID = M_REFERENCE and userGroupProf.M_OWNER_TP = 0
+INNER JOIN MX_USER_DBF usr on usr.M_REFERENCE = userGroupProf.M_OWNER_ID
+LEFT OUTER JOIN XMLTABLE(q'[
+    declare namespace ns = " ";
+    declare function ns:sort($seq as item()*)as item()*{
+       for $item in $seq
+       order by $item
+       return $item
+     } ;
+    for $batch in /profile/batches/batch
+        for $frameScreen in $batch/frameScreens
+            for $screen in $frameScreen/screen
+                let $shorcut := /profile/group-profile[@groupId = $frameScreen/@groupId]/shortcuts/navigation-action[@id = $screen/@fctId]
+                return (<r>
+                    <batchName>{data($batch/@name)}</batchName>
+                    <groupId>{data($frameScreen/@groupId)}</groupId>
+                    <frameScreenTitle>{data($frameScreen/@title)}</frameScreenTitle>
+                    <minimized>{data($frameScreen/@minimized)}</minimized>
+                    <fctId>{data($screen/@fctId)}</fctId>
+                    <fctType>{data($screen/@fctType)}</fctType>
+                    <title>{data($screen/@title)}</title>
+                    <shorcutFctId>{data($shorcut/@function-id)}</shorcutFctId>
+                    <layoutId>{data($shorcut/arguments/arg[@name="LAYOUT_ID"])}</layoutId>
+                    <portfolios>{string-join(ns:sort($shorcut/arguments/arg[starts-with(@name,'PF') or (starts-with(@name,'PTF-') and not(PTF-COUNT))]/text()),', ')}</portfolios>
+                </r>)]'
+    PASSING SAFEXMLTYPE(REGEXP_REPLACE(BLOBTOCLOB(usrProf.M_PROFILE),'<!DOCTYPE[^<]*>', ''))
+    COLUMNS   batchName VARCHAR2(1024) PATH '/r/batchName'
+            , groupId VARCHAR2(1024) PATH '/r/groupId'
+            , frameScreenTitle VARCHAR2(1024) PATH '/r/frameScreenTitle'
+            , minimized VARCHAR2(1024) PATH '/r/minimized'
+            , fctId VARCHAR2(1024) PATH '/r/fctId'
+            , fctType VARCHAR2(1024) PATH '/r/fctType'
+            , title VARCHAR2(1024) PATH '/r/title'
+            , shorcutFctId VARCHAR2(1024) PATH '/r/shorcutFctId'
+            , layoutId NUMERIC(10) PATH '/r/layoutId'
+            , portfolios VARCHAR2(1024) PATH '/r/portfolios'
+        ) profBatches ON 1=1
+LEFT OUTER JOIN TRN_GRPD_DBF grp on grp.M_LABEL = CAST(profBatches.groupId AS CHAR(10))
+LEFT OUTER JOIN navTemplate on navTemplate.M_REFERENCE = grp.M_NAV_TMPL and navTemplate.CommandId = NVL(profBatches.shorcutFctId, profBatches.fctId)
+LEFT OUTER JOIN VWR_CFGS_DBF viewsCfg ON viewsCfg.M_LMG_REF = profBatches.layoutId
+WHERE usr.M_LABEL =:USER_LABEL
+ORDER BY 1,2
+;]]></code>
+		</snippet>
+		<snippet name="Dates of Murex entities" description="">
+			<code><![CDATA[select 'FOD' as TYPE, trim(M_LABEL) as LABEL, to_char(M_DATE,'YYYY-MM-DD') as M_DATE from TRN_DSKD_DBF
+union all
+select 'CE' as TYPE, trim(M_LABEL) as LABEL, to_char(M_PCG_DATE,'YYYY-MM-DD') from TRN_ENTD_DBF where M_LABEL like 'MONACO%' or M_LABEL like 'SINGAP%'
+   or M_LABEL like 'ZURICH%' or M_LABEL like 'HK%' or M_LABEL like 'LUX%'
+union all
+select 'PLCC' as TYPE, trim(M_LABEL) as LABEL, to_char(M_DATE,'YYYY-MM-DD') from TRN_PLCC_DBF
+union all
+select 'PC' as TYPE,trim(M_LABEL) as LABEL, to_char(M_DATE,'YYYY-MM-DD') from TRN_PC_DBF;
+]]></code>
+		</snippet>
+		<snippet name="Class Mapping Query" description="">
+			<code><![CDATA[SELECT TRIM(M_NAME), TRIM(M_DESC) FROM CLASS_MAPPING_DBF 
+WHERE UPPER(M_NAME) LIKE '%MXCONTRACT%' 
+AND UPPER(M_NAME) NOT LIKE '%EVENT%' 
+AND TRIM(M_DESC) IS NOT NULL;]]></code>
+		</snippet>
+		<snippet name="Workflow Task Password" description="">
+			<code><![CDATA[WITH FUNCTION MurexPwdCrypto(p IN VARCHAR2, decrypting IN INTEGER) RETURN VARCHAR2
+IS
+encryptType PLS_INTEGER := DBMS_CRYPTO.ENCRYPT_AES128+ DBMS_CRYPTO.CHAIN_CBC+ DBMS_CRYPTO.PAD_PKCS5;
+mxkey RAW(32) := '188E3196B0CED65C796394846FC79438';
+BEGIN
+IF decrypting = 1 THEN
+RETURN UTL_I18N.RAW_TO_CHAR(UTL_RAW.SUBSTR(DBMS_CRYPTO.DECRYPT(src=>REGEXP_REPLACE(p,'00(..)','\1'),typ=>encryptType,key=>mxkey),17),'AL32UTF8');
+ELSE
+RETURN REGEXP_REPLACE((DBMS_CRYPTO.ENCRYPT(src=>UTL_I18N.STRING_TO_RAW(DBMS_RANDOM.string('A',16)||p,'AL32UTF8'),typ =>encryptType,key=>mxkey)),'(..)','00\1');
+END IF;
+EXCEPTION
+WHEN OTHERS THEN RETURN NULL;
+END;
+SELECT TaskName
+, TaskType
+, MurexPwdCrypto(CryptedPassword,1) DecryptedPassword
+, Username
+, TaskConfig
+FROM (
+SELECT TasksCfg.STM_CODE TaskName
+,Tasks.TYPE_CODE TaskType
+,XMLSERIALIZE(DOCUMENT SAFEXMLTYPE(MXBLOBTOCLOB(TasksCfg.XML,TasksCfg.XML_LZ)) INDENT SIZE=2) TaskConfig
+, XMLQUERY('//Property[@name="Password"]/text()' passing SAFEXMLTYPE( MxBlobToClob(TasksCfg.XML,TasksCfg.XML_LZ)) returning content).GETSTRINGVAL() CryptedPassword
+, XMLQUERY('//Property[@name="Username"]/text()' passing SAFEXMLTYPE( MxBlobToClob(TasksCfg.XML,TasksCfg.XML_LZ)) returning content).GETSTRINGVAL() Username
+FROM MXMLEX_TASK_TABLE Tasks
+INNER JOIN MXMLEX_TASK_CFG_TABLE TasksCfg
+ON TasksCfg.STM_CODE = Tasks.CODE
+WHERE TasksCfg.STATUS_TAKEN='N'
+AND Tasks.STATUS_TAKEN='N'
+AND XMLQUERY('//Property[@name="Password"]/text()' passing SAFEXMLTYPE( MxBlobToClob(TasksCfg.XML,TasksCfg.XML_LZ)) returning content).GETSTRINGVAL() IS NOT NULL
+AND XMLQUERY('/TaskConfiguration/@loadFromFS' passing SAFEXMLTYPE( MxBlobToClob(TasksCfg.XML,TasksCfg.XML_LZ)) returning content).GETSTRINGVAL() IS NULL
+)
+WHERE REGEXP_LIKE(MurexPwdCrypto(CryptedPassword,1),'^[[:print:]]*$')
+AND MurexPwdCrypto(CryptedPassword,1) IS NOT NULL
+ORDER BY 1]]></code>
+		</snippet>
+		<snippet name="Gather Stats" description="">
+			<code><![CDATA[exec dbms_stats.gather_schema_stats('MUREX',cascade => TRUE, estimate_percent => dbms_stats.auto_sample_size, degree => 48, options => 'GATHER AUTO');]]></code>
+		</snippet>
+		<snippet name="Datamart Delete REP Table content" description="">
+			<code><![CDATA[WITH FUNCTION executeSql(sqlQuery IN VARCHAR2) RETURN VARCHAR2 AS
+    PRAGMA UDF;
+    res VARCHAR2(64) ;
+    BEGIN
+        EXECUTE IMMEDIATE sqlQuery INTO res;
+        RETURN res;
+    EXCEPTION
+        WHEN OTHERS THEN RETURN SQLERRM;
+    END;
+FUNCTION executeDMLSql(sqlQuery IN VARCHAR2) RETURN VARCHAR2 AS 
+    PRAGMA AUTONOMOUS_TRANSACTION;
+    PRAGMA UDF;
+    BEGIN
+        EXECUTE IMMEDIATE sqlQuery;
+        COMMIT;
+        RETURN 'EXECUTED: '||sqlQuery;
+    EXCEPTION
+        WHEN OTHERS THEN RETURN SQLERRM;
+    END;
+DATAMART_JOBS AS (
+SELECT
+  TRIM(jobAuditRep.M_BATCH) bfLabel
+, REPLACE(TRIM(dynAuditRep.M_OUTPUTTBL),'.','_') outputTable
+, dynAuditRep.M_REF_DATA refData
+, TO_CHAR(jobAuditRep.M_DATE,'YYYY-MM-DD') runDate
+, TO_CHAR(TO_DATE(jobAuditRep.M_TIME,'sssss'),'hh24:mi:ss') startTime
+, TO_CHAR(TO_DATE(jobAuditRep.M_ENDTIME,'sssss'),'hh24:mi:ss') endTime
+, 'DELETE FROM '||REPLACE(TRIM(dynAuditRep.M_OUTPUTTBL),'.','_')||' WHERE M_REF_DATA='||dynAuditRep.M_REF_DATA deleteQuery
+, 'SELECT COUNT(*) FROM '||REPLACE(TRIM(dynAuditRep.M_OUTPUTTBL),'.','_')||' WHERE M_REF_DATA='||dynAuditRep.M_REF_DATA selecCountQuery
+FROM DYN_AUDIT_REP dynAuditRep
+INNER JOIN JOB_AUDIT_REP jobAuditRep ON jobAuditRep.M_MX_REF_JOB = dynAuditRep.M_IDJOB
+)
+SELECT
+  dmj.bfLabel
+, dmj.outputTable
+, dmj.refData
+, dmj.runDate
+, dmj.startTime
+, dmj.endTime
+, executeSql(dmj.selecCountQuery) countRows
+, dmj.deleteQuery
+--, executeDMLSql(dmj.deleteQuery)
+FROM DATAMART_JOBS dmj
+/****************************
+** ADJUST YOUR FILTER HERE :
+****************************/
+WHERE runDate >= '2022-07-20' AND startTime >= '10:00:00'
+;
+/]]></code>
+		</snippet>
+		<snippet name="Processing Scripts" description="">
+			<code><![CDATA[select ps.M_NAME
+, psItem.M_ORDER
+, psItem.M_UNIT
+, psItem.M_PARAM_LAB1
+, psItem.M_PARAM_LAB2
+, psItem.M_PARAM_LAB3
+, psItem.M_PARAM_LAB4
+from PROCESS#PS_SCRPT_DBF ps
+left outer join PROCESS#PS_ITEM_DBF psItem on psItem.M_REF = ps.M_REF
+--where M_UNIT LIKE '%PURGE%'
+order by ps.M_NAME, psItem.M_ORDER
+;]]></code>
+		</snippet>
+		<snippet name="Rich Client Audit Log" description="">
+			<code><![CDATA[SELECT
+  TO_CHAR(assLogLaunched.MESSAGE_TIME_STAMP, 'yyyy-mm-dd hh24:mi:ss') MESSAGE_TIME_STAMP
+, to_Char(from_tz(TO_TIMESTAMP('1970-01-01 00:00:00.0','YYYY-MM-DD HH24:MI:SS.FF') + NUMTODSINTERVAL(XMLQUERY('/projectLog/startTimeMs/text()' passing SAFEXMLTYPE( MxBlobToClob(assLogComplete.XML_DOCUMENT,assLogComplete.XML_DOCUMENT_LZ)) returning content).GETSTRINGVAL()/1000, 'SECOND'),'UTC')at time zone 'CET' ,'DD-MON-YYYY HH24:MI:SS.FF3') StartTime
+, to_Char(from_tz(TO_TIMESTAMP('1970-01-01 00:00:00.0','YYYY-MM-DD HH24:MI:SS.FF') + NUMTODSINTERVAL(XMLQUERY('/projectLog/endTimeMs/text()' passing SAFEXMLTYPE( MxBlobToClob(assLogComplete.XML_DOCUMENT,assLogComplete.XML_DOCUMENT_LZ)) returning content).GETSTRINGVAL()/1000, 'SECOND'),'UTC')at time zone 'CET' ,'DD-MON-YYYY HH24:MI:SS.FF3') EndTime
+, to_Char(from_tz(TO_TIMESTAMP('1970-01-01 00:00:00.0','YYYY-MM-DD HH24:MI:SS.FF') + NUMTODSINTERVAL((XMLQUERY('/projectLog/endTimeMs/text()' passing SAFEXMLTYPE( MxBlobToClob(assLogComplete.XML_DOCUMENT,assLogComplete.XML_DOCUMENT_LZ)) returning content).GETSTRINGVAL()-XMLQUERY('/projectLog/startTimeMs/text()' passing SAFEXMLTYPE( MxBlobToClob(assLogComplete.XML_DOCUMENT,assLogComplete.XML_DOCUMENT_LZ)) returning content).GETSTRINGVAL())/1000, 'SECOND'),'UTC')at time zone 'UTC' ,'HH24:MI:SS.FF3') Duration
+, assLogLaunched.PATH
+, assLogLaunched.STEP
+, assLogLaunched.TARGET
+, DECODE(assLogComplete.GSTATUS,'S', 'Success', 'F', '🛑FAILURE🛑', 'W', '⚠️Warning⚠', 'L', 'launched', assLogComplete.GSTATUS) COMPLETION_STATUS
+, SAFEXMLTYPE( MxBlobToClob(assLogComplete.XML_DOCUMENT,assLogComplete.XML_DOCUMENT_LZ)) messege
+FROM MXODR_ASSEMBLY_LOG assLogLaunched
+LEFT OUTER JOIN MXODR_ASSEMBLY_LOG assLogComplete ON assLogComplete.LOG_ID = assLogLaunched.LOG_ID AND assLogComplete.BUILD_ID = assLogLaunched.BUILD_ID AND assLogComplete.GSTATUS <> 'L'
+WHERE assLogLaunched.GSTATUS <> 'L'
+AND assLogLaunched.BUILD_ID = '20220909-131012706'
+ORDER BY assLogLaunched.MESSAGE_TIME_STAMP DESC;]]></code>
+		</snippet>
+		<snippet name="Trades Inserted By Interface" description="">
+			<code><![CDATA[WITH 
+WKF_TASK AS(
+SELECT T.CODE TASK,T.TYPE_CODE, TB.CODE NODE_NAME, TB.FILTER_CODE NODE_ID, TB.SYSTEM_ERROR
+FROM MUREX.MXMLEX_TASK_TABLE T
+INNER JOIN MUREX.MXMLEX_TASK_TABLEBODY TB ON TB.REFERENCE_ID=T.REFERENCE_ID 
+WHERE T.STATUS_TAKEN='N' AND DATASOURCE_CODE='STPDOC_ENTRY_SPACE'
+)
+,WKF_STRUCTURE AS(
+SELECT WKF_TASK_FROM.TASK TASK_FROM, WKF_TASK_FROM.NODE_ID NODE_FROM,
+WKF_TASK_TO.TASK TASK_TO, WKF_TASK_TO.NODE_ID NODE_TO,
+XMLCast(XMLQuery('/EvsTaskConfig/FilterFields/Column[Name="XMLFLOW_GRAMMAR_NAME"]/Value' PASSING SAFEXMLTYPE(MxBlobToClob(taskCfg.XML,taskCfg.XML_LZ)) RETURNING CONTENT) AS VARCHAR2(50)) XMLFLOW_GRAMMAR_NAME
+FROM MUREX.MXMLEX_LINK_TABLE MXMLLINK
+INNER JOIN WKF_TASK WKF_TASK_FROM ON WKF_TASK_FROM.TASK = MXMLLINK.FROM_TASK AND WKF_TASK_FROM.NODE_NAME = MXMLLINK.FROM_NODE
+INNER JOIN WKF_TASK WKF_TASK_TO ON WKF_TASK_TO.TASK = MXMLLINK.TO_TASK AND WKF_TASK_TO.NODE_NAME = MXMLLINK.TO_NODE
+LEFT OUTER JOIN MUREX.MXMLEX_TASK_CFG_TABLE taskCfg on taskCfg.STM_CODE = WKF_TASK_FROM.TASK AND taskCfg.STATUS_TAKEN = 'N'
+WHERE MXMLLINK.STATUS_TAKEN ='N' AND
+WKF_TASK_FROM.TYPE_CODE ='ImportMxML' --AND UPPER(WKF_TASK_FROM.NODE_NAME) <>'ERROR' AND WKF_TASK_FROM.SYSTEM_ERROR ='N' 
+AND WKF_TASK_FROM.TASK NOT IN ( 'exg_imp.calendar.mxml.import','exg_imp.cp.import.mxml','exg_imp.sii.importMxML')
+)
+,stpDoc AS(
+SELECT
+stpDocEntry.JOB_DATE STATUS_DATE
+/*,TO_CHAR(TO_DATE('01-01-1970','dd-mm-yyyy')+stpDocEntry.STATUS_TIME_LONG/(1000*60*60*24),'YYYY-MM-DD HH24:MI:SS') INSERTION_DATETIME*/
+, TO_CHAR(stpDocEntry.JOB_DATE,'yyyy/mm/dd ')||' '||TO_CHAR(stpDocEntry.JOB_TIME,'hh24:mi:ss') INSERTION_DATETIME
+,stpDocEntry.XMLFLOW_UID
+,COALESCE(TRIM(stpDocEntry.STPDOC_UNDERLYING_REF_TYPE),TRIM(stpDocEntry.SOURCE_EVENT_CLASS_ID),TRIM(stpDocEntry.STPDOC_DATA_TYPE2),TRIM(stpDocEntry.STPDOC_REF_TYPE)) SOURCE_SYSTEM
+,stpDocEntry.XMLFLOW_STATUS
+,ws.XMLFLOW_GRAMMAR_NAME
+,stpDocEntry.REFERENCE_ID
+FROM WKF_STRUCTURE ws
+INNER JOIN MUREX.STPDOC_ENTRY_TABLE stpDocEntry ON  stpDocEntry.XMLFLOW_STATUS = ws.NODE_FROM
+WHERE stpDocEntry.JOB_DATE=TO_DATE(:REPORTING_DATE,'DD-MM-YYYY')
+AND stpDocEntry.SOURCE_EVENT_CLASS_ID NOT IN ('CONVFIONAL','CONVFIONA','CONV')
+)
+,StpDocBods AS (
+SELECT stpDoc.REFERENCE_ID
+,max(stpDocBodyOk.BODY_DOCUMENT_ID) OK_BODY_DOCUMENT_ID
+,max(stpDocBodyErr.BODY_DOCUMENT_ID) ERR_BODY_DOCUMENT_ID
+FROM STPDOC
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY stpDocBodyOk  ON  stpDocBodyOk.REFERENCE_ID=stpDoc.REFERENCE_ID AND  stpDocBodyOk.XMLFLOW_GRAMMAR_NAME='evs_ans_ok.dtd'
+LEFT OUTER JOIN STPDOC_ENTRY_TABLEBODY stpDocBodyErr ON stpDocBodyErr.REFERENCE_ID=stpDoc.REFERENCE_ID AND stpDocBodyErr.XMLFLOW_GRAMMAR_NAME='evs_ans_err.dtd'
+GROUP BY stpDoc.REFERENCE_ID
+)
+SELECT
+stpDoc.INSERTION_DATETIME
+,stpDoc.XMLFLOW_UID
+,stpDoc.SOURCE_SYSTEM
+,TRIM(s.M_LABEL) SOURCE_MODULE
+,E.EXCEPTION_LEVEL
+,contract.M_PACK_REF
+,trnHdr.M_CONTRACT
+,E.TRADE_ID
+,trnHdr.M_GID GLOBAL_ID
+,altId.M_OBJ_ASYS Alternate_System
+,altId.M_OBJ_ALT Alternate_Id
+,DECODE(E.TRADE_ID,NULL,'',TRIM(trnHdr.M_TRN_FMLY)||'|'||TRIM(trnHdr.M_TRN_GRP)||'|'||TRIM(trnHdr.M_TRN_TYPE)) AS "FMLY|GRP|TYPE"
+,TRIM(typoTrn.M_LABEL) TRADE_TYPO
+,TRIM(inst.M_LABEL) inst
+,TRIM(DECODE(trnHdr.M_BINTERNAL,'Y',trnHdr.M_BTRADER,trnHdr.M_STRADER)) trader
+,TRIM(trnHdr.M_SALES) sales
+, TRIM(DECODE(trnHdr.M_BINTERNAL,'N',TRIM(trnHdr.M_BPFOLIO) || ' ' , '') || DECODE(trnHdr.M_SINTERNAL,'N',TRIM(trnHdr.M_SPFOLIO) || ' ' , '')) ExternalCpt_trnhdr
+, TRIM(DECODE(trnHdr.M_BINTERNAL,'Y',TRIM(trnHdr.M_BPFOLIO) || ' ' , '') || DECODE(trnHdr.M_SINTERNAL,'Y',TRIM(trnHdr.M_SPFOLIO) || ' ' , '')) MurexPtf_trnhdr
+,contract.M_STP_STATUS
+,trnHdr.M_TRN_STATUS
+,REPLACE(XMLQuery(q'[string-join(//Description[not(../MXExceptions)],',CRLF')]' PASSING SAFEXMLTYPE(MxBlobToClob(mxmlexRepoErr.XML,mxmlexRepoErr.XML_LZ)) RETURNING CONTENT).GETCLOBVAL(),',CRLF',(chr(13)||chr(10))) ERROR_DESCRIPTION
+,stpDoc.XMLFLOW_STATUS
+FROM stpDoc
+LEFT OUTER JOIN StpDocBods on StpDocBods.REFERENCE_ID = stpDoc.REFERENCE_ID
+LEFT OUTER JOIN MUREX.MXMLEX_REPOSITORY_SPACE mxmlexRepoOk ON mxmlexRepoOk.XML_DOCUMENT_ID=StpDocBods.OK_BODY_DOCUMENT_ID
+LEFT OUTER JOIN XMLTABLE('
+for $i in /GuiRoot
+    let $exceptionLevel := $i/requestAnswer/@exceptionLevel
+    for $j in distinct-values($i//tradeInternalId)
+        return (<r>
+            <tradeInternalId>{data($j)}</tradeInternalId>
+            <exceptionLevel>{data($exceptionLevel)}</exceptionLevel>
+        </r>)'
+  PASSING SAFEXMLTYPE(REGEXP_REPLACE(MxBlobToClob(mxmlexRepoOk.XML,mxmlexRepoOk.XML_LZ), '<!DOCTYPE[^<]*>', ''))
+  COLUMNS TRADE_ID NUMBER(10) PATH '/r/tradeInternalId'
+          ,EXCEPTION_LEVEL VARCHAR2(50) PATH '/r/exceptionLevel'
+          )E ON 1=1
+LEFT OUTER JOIN MUREX.MXMLEX_REPOSITORY_SPACE mxmlexRepoErr ON mxmlexRepoErr.XML_DOCUMENT_ID=StpDocBods.ERR_BODY_DOCUMENT_ID --AND E.EXCEPTION_LEVEL <> 'none' AND E.EXCEPTION_LEVEL IS NOT NULL AND StpDocBods.ERR_BODY_DOCUMENT_ID IS NOT NULL
+LEFT OUTER JOIN MUREX.TRN_HDR_DBF trnHdr ON trnHdr.M_NB=E.TRADE_ID AND E.TRADE_ID IS NOT NULL
+LEFT OUTER JOIN MUREX.TRN_EXT_DBF tExt ON trnHdr.M_LEXTREF = tExt.M_REFERENCE
+LEFT OUTER JOIN MUREX.TABLE#DATA#DEALCURR_DBF udf ON udf.M_NB = tExt.M_UDF_REF
+LEFT OUTER JOIN MUREX.TYPOLOGY_DBF typoTrn ON typoTrn.M_REFERENCE=trnHdr.M_TYPOLOGY AND trnHdr.M_TYPOLOGY IS NOT NULL
+LEFT OUTER JOIN MUREX.CONTRACT_DBF contract ON contract.M_REFERENCE=trnHdr.M_CONTRACT
+LEFT OUTER JOIN MUREX.KEYMAP_STC_DBF altId  ON altId.M_OBJ_ID=trnHdr.M_CONTRACT
+LEFT OUTER JOIN MUREX.TRN_PLIN_DBF inst ON inst.M_REFERENCE=trnHdr.M_INSTRUMENT
+LEFT OUTER JOIN MUREX.SRC_MOD_DBF s ON contract.M_SRC_MODULE = s.M_REFERENCE
+WHERE stpDoc.STATUS_DATE=TO_DATE(:REPORTING_DATE,'DD-MM-YYYY')
+ORDER BY stpDoc.REFERENCE_ID DESC]]></code>
+		</snippet>
+		<snippet name="DB Locks" description="">
+			<code><![CDATA[select c.username "Server",
+decode(b.id2,0,a.object_name,
+'Trans-'||to_char(B.ID1)) object_name,
+decode(b.lmode,
+0,'--Waiting--',1,'Null',2,'Row Share',
+3,'Row Excl',4,'Share',5,'Sha Row Exc',
+6,'Exclusive','Other') "Lock Mode",
+decode(b.request,0,' ',1,'Null',2,'Row Share',
+3,'Row Excl',4,'Share',5,'Sha Row Exc',
+6,'Exclusive','Other') "Req Mode" ,
+decode(b.block,1,'Blocking ') "State ",
+case
+when (b.request = 6 and b.lmode = 0)
+then dbms_rowid.rowid_create
+(1,c.row_wait_obj#,c.row_wait_file#,c.row_wait_block#,c.row_wait_row# )
+end as "Waiting on Row"
+from dba_objects a, gv$lock b, gv$session c
+where a.object_id(+) = b.id1
+and b.sid = c.sid and c.username is not null and b.lmode != 4
+order by c.username, b.sid, b.id2 desc;]]></code>
+		</snippet>
+		<snippet name="Clone Jobs for tmxclon1" description="">
+			<code><![CDATA[SELECT * FROM ADMIN.CLONE_ORDER ORDER BY RUN_TIME DESC;]]></code>
+		</snippet>
+		<snippet name="eTradepad Strategies" description="">
+			<code><![CDATA[SELECT treeConfigHead.M_OWNER
+, DECODE(treeConfigHead.M_GENDER, 0,'Unkown', 1,'Global',2,'Profile', 3,'User','_Unknow_Mapping_') GENDER_DECODED
+, stratHeader.M_LABEL STRAT_LABEL
+, npdFldImp.M_LEG_ID
+, npdFldImp.M_FLD_LBL FIELD_LABEL
+, npdFldImp.M_VALUE FIELD_VALUE
+--'*** EBX_HDR_DBF ***'
+--, treeConfigHead.* 
+--, DECODE(treeConfigHead.M_GENDER, 0,'Unkown', 1,'Global',2,'Profile', 3,'User','_Unknow_Mapping_') GENDER_DECODED
+--, '*** EBX_BOX_DBF ***'
+--, treeConfigBody.* 
+--, DECODE(treeConfigBody.M_GENDER, 0,'Unkown', 1,'Global',2,'Profile', 3,'User','_Unknow_Mapping_') GENDER_DECODED
+--, '*** NPD_HDR_DBF ***'
+--, stratHeader.* 
+--, DECODE(stratHeader.M_PRC_MODE,  0,'Notepad',1,'Strategy',4,'Structured bonds',5,'IRD Pricing Sheets',6,'Nth-CDO',9,'Structured Warrant','_Unknow_Mapping_') PRICING_MODE_DECODED
+--, '*** NPD_BDY_DBF ***'
+--, stratBody.* 
+--, '*** NP_IMPACT_DBF ***'
+--, npdFldImp.* 
+FROM EBX_HDR_DBF treeConfigHead
+LEFT OUTER JOIN EBX_BOX_DBF treeConfigBody ON treeConfigBody.M_KEY = treeConfigHead.M_BOXES
+LEFT OUTER JOIN NPD_HDR_DBF stratHeader ON stratHeader.M_PRC_MODE = 1 /* 1:Strategy*/ AND stratHeader.M_LABEL = treeConfigBody.M_LABEL AND stratHeader.M_USER = treeConfigHead.M_OWNER
+LEFT OUTER JOIN NPD_BDY_DBF stratBody ON stratBody.M_ROOT_ID = stratHeader.M_ID
+LEFT OUTER JOIN NP_IMPACT_DBF npdFldImp ON npdFldImp.M_LEG_ID = stratBody.M_LEG_ID
+WHERE 1=1
+AND treeConfigHead.M_DOMAIN = 'e-Tradepad' 
+AND treeConfigHead.M_OWNER = 'U21315' AND npdFldImp.M_FLD_LBL = 'NP#FACCUM~0~CUTOFF'
+;]]></code>
+		</snippet>
+		<snippet name="Workflow Backlog" description="">
+			<code><![CDATA[WITH
+WKF_TASK AS(
+SELECT T.CODE TASK,T.TYPE_CODE, TB.CODE NODE_NAME, TB.FILTER_CODE NODE_ID, TB.SYSTEM_ERROR, sheet.MW_CODE SHEET_NAME
+FROM MXMLEX_TASK_TABLE T
+INNER JOIN MXMLEX_TASK_TABLEBODY TB ON TB.REFERENCE_ID=T.REFERENCE_ID
+INNER JOIN MW_SHEET_TBL sheet ON sheet.MW_ID = T.MW_SHEET_ID
+WHERE T.STATUS_TAKEN='N' AND DATASOURCE_CODE='STPDOC_ENTRY_SPACE'
+)
+SELECT
+count(D.XMLFLOW_UID)
+, wt.TASK
+, wt.TYPE_CODE
+, wt.SYSTEM_ERROR
+, linkk.TO_TASK
+, linkk.TO_NODE
+FROM --TIMEZ, 
+STPDOC_ENTRY_TABLE D
+INNER JOIN WKF_TASK wt ON D.XMLFLOW_STATUS = wt.NODE_ID
+LEFT OUTER JOIN MXMLEX_LINK_TABLE linkk ON linkk.FROM_NODE = wt.NODE_NAME AND linkk.FROM_TASK = wt.TASK AND linkk.STATUS_TAKEN = 'N'
+WHERE D.JOB_DATE= TRUNC(SYSDATE)
+AND D.STATUS_TAKEN = 'N' AND wt.SYSTEM_ERROR <> 'Y'
+GROUP BY wt.TASK, wt.TYPE_CODE, wt.SYSTEM_ERROR, linkk.TO_TASK, linkk.TO_NODE
+;]]></code>
+		</snippet>
+		<snippet name="Sim View Background Image" description="">
+			<code><![CDATA[--update GIM_F_IMAGE_DBF set M_CONTENT = NULL where M_REFERENCE in (
+    select M_IDF_IMAGE, GIM_FMT_DBF.* from GIM_FMT_DBF where M_REFERENCE in (
+        select M_GDSC_CFR from VWR_GUIDESC_DBF where M_GDSC_R in (
+            select M_VW_GUI_R from VWR_FRMT_DBF where M_FRMTM_REF in (
+                select M_VW_FRMT_REF from VWR_CFGS_DBF where M_CFG_LBL in ('MX_FXD_FooterVega', 'MX_FXD_PLSummary_Consolidated')
+                )
+            )
+--    )
+);]]></code>
+		</snippet>
+	</group>
+</snippets>
